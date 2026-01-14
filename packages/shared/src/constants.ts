@@ -1,9 +1,11 @@
 import path from "node:path";
 import os from "node:os";
 
-export const HOME_DIR = path.join(os.homedir(), ".claude-code-router");
+// Support CCR_HOME environment variable to override default home directory
+export const HOME_DIR = process.env.CCR_HOME || path.join(os.homedir(), ".claude-code-router");
 
-export const CONFIG_FILE = path.join(HOME_DIR, "config.json");
+// Support CCR_CONFIG_FILE environment variable to override config file path
+export const CONFIG_FILE = process.env.CCR_CONFIG_FILE || path.join(HOME_DIR, "config.json");
 
 export const PLUGINS_DIR = path.join(HOME_DIR, "plugins");
 
