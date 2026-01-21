@@ -18,6 +18,22 @@ interface RequestLogEntry {
     tools?: any[];
     stream?: boolean;
   };
+  upstreamRequest?: {
+    url: string;
+    model?: string;
+    max_tokens?: number;
+    temperature?: number;
+    stream?: boolean;
+    messages?: any[];
+    timestamp: string;
+  };
+  upstreamResponse?: {
+    status: number;
+    statusText: string;
+    headers?: Record<string, string>;
+    rawContent?: string;
+    timestamp: string;
+  };
   response: {
     id?: string;
     model?: string;
@@ -44,6 +60,9 @@ interface RequestLoggerOptions {
   includeMessages?: boolean;       // Whether to include full message history
   includeTools?: boolean;          // Whether to include tools definition
   maxMessageLength?: number;       // Max length for each message (0 = unlimited)
+  includeUpstreamRequest?: boolean;   // Whether to log upstream request (default true)
+  includeUpstreamResponse?: boolean;  // Whether to log upstream response (default true)
+  includeUpstreamHeaders?: boolean;   // Whether to log upstream headers (default false)
 }
 
 const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, options) => {
@@ -53,7 +72,10 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
     includeSystemPrompt = true,
     includeMessages = true,
     includeTools = false,
-    maxMessageLength = 0
+    maxMessageLength = 0,
+    includeUpstreamRequest = true,
+    includeUpstreamResponse = true,
+    includeUpstreamHeaders = true
   } = options;
 
   if (!enabled) {
@@ -81,6 +103,43 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
   const truncate = (str: string, maxLength: number): string => {
     if (maxLength === 0 || str.length <= maxLength) return str;
     return str.substring(0, maxLength) + `... [truncated, ${str.length - maxLength} more chars]`;
+  };
+
+  // Helper function to collect stream content
+  const collectStreamContent = async (stream: ReadableStream): Promise<string> => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let content = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        content += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return content;
+  };
+
+  // Helper function to sanitize upstream request data
+  const sanitizeUpstreamRequest = (data: any): any => {
+    const result: any = {
+      url: data.url,
+      model: data.body?.model,
+      max_tokens: data.body?.max_tokens,
+      temperature: data.body?.temperature,
+      stream: data.body?.stream,
+      timestamp: data.timestamp,
+    };
+
+    if (includeMessages && data.body?.messages) {
+      result.messages = sanitizeMessages(data.body.messages);
+    }
+
+    return result;
   };
 
   // Helper function to sanitize message content
@@ -169,6 +228,47 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
     const logEntry = req.logEntry as RequestLogEntry;
     logEntry.duration_ms = Date.now() - req.requestStartTime;
 
+    // Capture upstream request data
+    if (includeUpstreamRequest && req.upstreamRequest) {
+      logEntry.upstreamRequest = sanitizeUpstreamRequest(req.upstreamRequest);
+    }
+
+    // Capture upstream response data (will be completed asynchronously for streaming)
+    if (includeUpstreamResponse && req.upstreamResponse) {
+      logEntry.upstreamResponse = {
+        status: req.upstreamResponse.status,
+        statusText: req.upstreamResponse.statusText,
+        timestamp: req.upstreamResponse.timestamp,
+      };
+
+      if (includeUpstreamHeaders) {
+        logEntry.upstreamResponse.headers = req.upstreamResponse.headers;
+      }
+
+      // Handle upstream stream response collection
+      if (req.upstreamResponse.isStream && req.upstreamResponse.body instanceof ReadableStream) {
+        // Store promise for later awaiting
+        req.upstreamStreamPromise = collectStreamContent(req.upstreamResponse.body)
+          .then(rawContent => {
+            logEntry.upstreamResponse!.rawContent = rawContent;
+          })
+          .catch(error => {
+            fastify.log.error(`Error collecting upstream stream: ${error.message}`);
+          });
+      } else if (req.upstreamResponse.body && !req.upstreamResponse.isStream) {
+        // Non-streaming upstream response
+        try {
+          if (typeof req.upstreamResponse.body === 'string') {
+            logEntry.upstreamResponse.rawContent = req.upstreamResponse.body;
+          } else if (req.upstreamResponse.body.text) {
+            logEntry.upstreamResponse.rawContent = await req.upstreamResponse.body.text();
+          }
+        } catch (e) {
+          // Response may already be consumed, ignore
+        }
+      }
+    }
+
     // Handle streaming response
     if (payload instanceof ReadableStream) {
       const [loggingStream, originalStream] = payload.tee();
@@ -243,6 +343,11 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
 
           if (lastUsage) {
             logEntry.response.usage = lastUsage;
+          }
+
+          // Wait for upstream stream collection to complete if exists
+          if (req.upstreamStreamPromise) {
+            await req.upstreamStreamPromise;
           }
 
           // Write to log file

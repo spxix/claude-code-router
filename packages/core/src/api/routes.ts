@@ -350,6 +350,16 @@ async function sendRequestToProvider(
     }
   }
 
+  // Attach upstream request data to req object for logging
+  if (context?.req) {
+    context.req.upstreamRequest = {
+      url: typeof url === 'string' ? url : url.toString(),
+      body: JSON.parse(JSON.stringify(requestBody)), // Deep copy
+      headers: { ...requestHeaders },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   const response = await sendUnifiedRequest(
     url,
     requestBody,
@@ -365,6 +375,19 @@ async function sendRequestToProvider(
   // Handle request errors
   if (!response.ok) {
     const errorText = await response.text();
+    // Attach error response to req object for logging
+    if (context?.req) {
+      const headersObj: Record<string, string> = {};
+      response.headers.forEach((value, key) => { headersObj[key] = value; });
+      context.req.upstreamResponse = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: headersObj,
+        body: errorText,
+        isStream: false,
+        timestamp: new Date().toISOString(),
+      };
+    }
     fastify.log.error(
       `[provider_response_error] Error from provider(${provider.name},${requestBody.model}: ${response.status}): ${errorText}`,
     );
@@ -373,6 +396,42 @@ async function sendRequestToProvider(
       response.status,
       "provider_response_error"
     );
+  }
+
+  // Attach upstream response data to req object for logging
+  if (context?.req) {
+    const respHeadersObj: Record<string, string> = {};
+    response.headers.forEach((value: string, key: string) => { respHeadersObj[key] = value; });
+
+    if (requestBody.stream && response.body) {
+      // For streaming response, use tee() to clone the stream
+      const [logStream, returnStream] = response.body.tee();
+      context.req.upstreamResponse = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: respHeadersObj,
+        body: logStream,
+        isStream: true,
+        timestamp: new Date().toISOString(),
+      };
+      // Return a new Response using returnStream
+      return new Response(returnStream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } else {
+      // For non-streaming response, clone the response
+      const clonedResponse = response.clone();
+      context.req.upstreamResponse = {
+        status: response.status,
+        statusText: response.statusText,
+        headers: respHeadersObj,
+        body: clonedResponse,
+        isStream: false,
+        timestamp: new Date().toISOString(),
+      };
+    }
   }
 
   return response;
