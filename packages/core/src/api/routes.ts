@@ -404,18 +404,42 @@ async function sendRequestToProvider(
     response.headers.forEach((value: string, key: string) => { respHeadersObj[key] = value; });
 
     if (requestBody.stream && response.body) {
-      // For streaming response, use tee() to clone the stream
-      const [logStream, returnStream] = response.body.tee();
+      // Create a buffer to collect stream content for logging
+      const chunks: Uint8Array[] = [];
+
+      // Create a TransformStream that copies data while passing through
+      // This avoids the backpressure deadlock caused by tee()
+      const copyTransform = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          // Copy chunk to buffer for logging
+          chunks.push(chunk.slice());
+          // Pass through unchanged
+          controller.enqueue(chunk);
+        },
+        flush() {
+          // Stream finished - attach collected data to request for logging
+          if (context?.req) {
+            // Decode chunks to string
+            const decoder = new TextDecoder();
+            const content = chunks.map(c => decoder.decode(c, { stream: true })).join('');
+            context.req.upstreamResponseContent = content;
+          }
+        }
+      });
+
+      // Pipe response through the copy transform
+      const transformedStream = response.body.pipeThrough(copyTransform);
+
       context.req.upstreamResponse = {
         status: response.status,
         statusText: response.statusText,
         headers: respHeadersObj,
-        body: logStream,
         isStream: true,
         timestamp: new Date().toISOString(),
+        // body is no longer stored as a stream reference; content is obtained via upstreamResponseContent
       };
-      // Return a new Response using returnStream
-      return new Response(returnStream, {
+
+      return new Response(transformedStream, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,

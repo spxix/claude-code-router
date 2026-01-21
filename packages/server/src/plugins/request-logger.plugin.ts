@@ -105,25 +105,6 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
     return str.substring(0, maxLength) + `... [truncated, ${str.length - maxLength} more chars]`;
   };
 
-  // Helper function to collect stream content
-  const collectStreamContent = async (stream: ReadableStream): Promise<string> => {
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    let content = '';
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        content += decoder.decode(value, { stream: true });
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    return content;
-  };
-
   // Helper function to sanitize upstream request data
   const sanitizeUpstreamRequest = (data: any): any => {
     const result: any = {
@@ -245,17 +226,11 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
         logEntry.upstreamResponse.headers = req.upstreamResponse.headers;
       }
 
-      // Handle upstream stream response collection
-      if (req.upstreamResponse.isStream && req.upstreamResponse.body instanceof ReadableStream) {
-        // Store promise for later awaiting
-        req.upstreamStreamPromise = collectStreamContent(req.upstreamResponse.body)
-          .then(rawContent => {
-            logEntry.upstreamResponse!.rawContent = rawContent;
-          })
-          .catch(error => {
-            fastify.log.error(`Error collecting upstream stream: ${error.message}`);
-          });
-      } else if (req.upstreamResponse.body && !req.upstreamResponse.isStream) {
+      // For streaming upstream response, content will be available via upstreamResponseContent
+      // after the stream is fully consumed (populated by the TransformStream in routes.ts)
+      // We'll retrieve it later when writing the log entry
+
+      if (req.upstreamResponse.body && !req.upstreamResponse.isStream) {
         // Non-streaming upstream response
         try {
           if (typeof req.upstreamResponse.body === 'string') {
@@ -345,9 +320,9 @@ const register: FastifyPluginAsync<RequestLoggerOptions> = async (fastify, optio
             logEntry.response.usage = lastUsage;
           }
 
-          // Wait for upstream stream collection to complete if exists
-          if (req.upstreamStreamPromise) {
-            await req.upstreamStreamPromise;
+          // Get upstream response content if available (populated by TransformStream in routes.ts)
+          if (req.upstreamResponseContent && logEntry.upstreamResponse) {
+            logEntry.upstreamResponse.rawContent = req.upstreamResponseContent;
           }
 
           // Write to log file
