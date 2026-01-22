@@ -102,11 +102,16 @@ export async function executeCodeCommand(
   const argsObj = minimist(args)
   const argsArr = []
   for (const [argsObjKey, argsObjValue] of Object.entries(argsObj)) {
-    if (argsObjKey !== '_' && argsObj[argsObjKey]) {
+    // Skip the '_' key (positional arguments) and undefined values only
+    // Allow falsy values like empty strings, 0, false
+    if (argsObjKey !== '_' && argsObjValue !== undefined) {
       const prefix = argsObjKey.length === 1 ? '-' : '--';
       // For boolean flags, don't append the value
       if (argsObjValue === true) {
         argsArr.push(`${prefix}${argsObjKey}`);
+      } else if (argsObjValue === false) {
+        // Skip false boolean flags
+        continue;
       } else {
         argsArr.push(`${prefix}${argsObjKey} ${JSON.stringify(argsObjValue)}`);
       }
