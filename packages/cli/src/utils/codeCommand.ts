@@ -100,7 +100,7 @@ export async function executeCodeCommand(
     : "inherit"; // Default inherited behavior
 
   const argsObj = minimist(args)
-  const argsArr = []
+  const argsArr: string[] = []
   for (const [argsObjKey, argsObjValue] of Object.entries(argsObj)) {
     // Skip the '_' key (positional arguments) and undefined values only
     // Allow falsy values like empty strings, 0, false
@@ -113,7 +113,15 @@ export async function executeCodeCommand(
         // Skip false boolean flags
         continue;
       } else {
-        argsArr.push(`${prefix}${argsObjKey} ${JSON.stringify(argsObjValue)}`);
+        // In NON_INTERACTIVE_MODE, use shell: false which requires separate flag and value
+        // In interactive mode, keep combined for shell: true compatibility
+        if (config.NON_INTERACTIVE_MODE) {
+          argsArr.push(`${prefix}${argsObjKey}`);
+          // Convert value to string (JSON.stringify adds quotes, we just need the raw value)
+          argsArr.push(typeof argsObjValue === 'string' ? argsObjValue : JSON.stringify(argsObjValue));
+        } else {
+          argsArr.push(`${prefix}${argsObjKey} ${JSON.stringify(argsObjValue)}`);
+        }
       }
     }
   }
@@ -125,13 +133,19 @@ export async function executeCodeCommand(
         ...process.env,
       },
       stdio: stdioConfig,
-      shell: true,
+      // Use shell: false in NON_INTERACTIVE_MODE for proper stdin forwarding
+      // Shell mode intercepts stdin which breaks SDK control protocol
+      shell: !config.NON_INTERACTIVE_MODE,
     }
   );
 
-  // Close stdin for non-interactive mode
-  if (config.NON_INTERACTIVE_MODE) {
-    claudeProcess.stdin?.end();
+  // In non-interactive mode, forward stdin from parent process to claude subprocess
+  // This is necessary for SDK control protocol (initialize, interrupt, etc.) to work
+  if (config.NON_INTERACTIVE_MODE && claudeProcess.stdin) {
+    process.stdin.pipe(claudeProcess.stdin);
+    process.stdin.on('end', () => {
+      claudeProcess.stdin?.end();
+    });
   }
 
   claudeProcess.on("error", (error) => {
