@@ -1,4 +1,5 @@
 import { spawn, type StdioOptions } from "child_process";
+import * as fs from "fs";
 import {getSettingsPath, readConfigFile} from ".";
 import {
   decrementReferenceCount,
@@ -148,10 +149,25 @@ export async function executeCodeCommand(
     });
   }
 
-  // In non-interactive mode, forward stdout from claude subprocess to parent process
-  // This ensures SDK receives claude's JSON output properly
+  // In non-interactive mode, forward stdout from claude subprocess
+  // Check CCR_OUTPUT_FILE for file-based output (bypasses stdout pipe issues with tee)
   if (config.NON_INTERACTIVE_MODE && claudeProcess.stdout) {
-    claudeProcess.stdout.pipe(process.stdout);
+    const outputFilePath = process.env.CCR_OUTPUT_FILE;
+    if (outputFilePath) {
+      // File-based output mode: write to file instead of stdout
+      // This bypasses issues with stdout pipe when running under tee wrappers
+      const outputFd = fs.openSync(outputFilePath, 'a');
+      claudeProcess.stdout.on('data', (chunk: Buffer) => {
+        fs.writeSync(outputFd, chunk);
+        fs.fsyncSync(outputFd); // Force flush to disk immediately
+      });
+      claudeProcess.on('close', () => {
+        fs.closeSync(outputFd);
+      });
+    } else {
+      // Default: pipe to stdout
+      claudeProcess.stdout.pipe(process.stdout);
+    }
   }
 
   claudeProcess.on("error", (error) => {
