@@ -96,7 +96,7 @@ export async function executeCodeCommand(
   const joinedArgs = args.length > 0 ? quote(args) : "";
 
   const stdioConfig: StdioOptions = config.NON_INTERACTIVE_MODE
-    ? ["pipe", "inherit", "inherit"] // Pipe stdin for non-interactive
+    ? ["pipe", "pipe", "inherit"] // Pipe stdin and stdout for non-interactive SDK mode
     : "inherit"; // Default inherited behavior
 
   const argsObj = minimist(args)
@@ -146,6 +146,12 @@ export async function executeCodeCommand(
     process.stdin.on('end', () => {
       claudeProcess.stdin?.end();
     });
+  }
+
+  // In non-interactive mode, forward stdout from claude subprocess to parent process
+  // This ensures SDK receives claude's JSON output properly
+  if (config.NON_INTERACTIVE_MODE && claudeProcess.stdout) {
+    claudeProcess.stdout.pipe(process.stdout);
   }
 
   claudeProcess.on("error", (error) => {
